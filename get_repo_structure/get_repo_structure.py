@@ -41,7 +41,12 @@ def checkout_commit(repo_path, commit_id):
         print(f"An unexpected error occurred: {e}")
 
 
-def clone_repo(repo_name, repo_playground):
+def clone_repo(repo_name, repo_playground, code_changes=None):
+    def test_file_warning(code_changes):
+        # Regex to find filenames that start with 'test_' and end with '.py'
+        test_files = re.findall(r'\+\+\+ b/(test_.+\.py)', code_changes)
+        for file in test_files:
+            print(f"WARNING: The patch contains modifications to a test file: {file}")
     try:
 
         print(
@@ -57,6 +62,25 @@ def clone_repo(repo_name, repo_playground):
             check=True,
         )
         print("Repository cloned successfully.")
+        
+        # apply code changes patch
+        if code_changes:
+            test_file_warning(code_changes)
+            
+            # Write the patch content to a file
+            patch_file_path = f"{repo_path}/patch.diff"
+            with open(patch_file_path, 'w') as patch_file:
+                patch_file.write(code_changes)
+
+            # Apply the patch using git
+            print("Applying patch...")
+            subprocess.run(
+                ["git", "apply", patch_file_path],
+                cwd=repo_path,  # Important: set the current working directory to the repo path
+                check=True
+            )
+            print("Patch applied successfully.")
+
     except subprocess.CalledProcessError as e:
         print(f"An error occurred while running git command: {e}")
     except Exception as e:
@@ -64,25 +88,29 @@ def clone_repo(repo_name, repo_playground):
 
 
 def get_project_structure_from_scratch(
-    repo_name, commit_id, instance_id, repo_playground
+    repo_name, commit_id, instance_id, repo_playground, clone_from_local_dir=None, code_changes=None,
 ):
+    if clone_from_local_dir:
+        repo_playground = os.path.join(repo_playground, clone_from_local_dir)
+        assert os.path.exists(repo_playground)
+    else:
+        # Generate a temperary folder and add uuid to avoid collision
+        repo_playground = os.path.join(repo_playground, str(uuid.uuid4()))
 
-    # Generate a temperary folder and add uuid to avoid collision
-    repo_playground = os.path.join(repo_playground, str(uuid.uuid4()))
+        # assert playground doesn't exist
+        assert not os.path.exists(repo_playground), f"{repo_playground} already exists"
 
-    # assert playground doesn't exist
-    assert not os.path.exists(repo_playground), f"{repo_playground} already exists"
+        # create playground
+        os.makedirs(repo_playground)
 
-    # create playground
-    os.makedirs(repo_playground)
-
-    clone_repo(repo_name, repo_playground)
-    checkout_commit(f"{repo_playground}/{repo_to_top_folder[repo_name]}", commit_id)
+        clone_repo(repo_name, repo_playground, code_changes)
+        checkout_commit(f"{repo_playground}/{repo_to_top_folder[repo_name]}", commit_id)
     structure = create_structure(f"{repo_playground}/{repo_to_top_folder[repo_name]}")
     # clean up
-    subprocess.run(
-        ["rm", "-rf", f"{repo_playground}/{repo_to_top_folder[repo_name]}"], check=True
-    )
+    if not clone_from_local_dir:
+        subprocess.run(
+            ["rm", "-rf", f"{repo_playground}/{repo_to_top_folder[repo_name]}"], check=True
+        )
     d = {
         "repo": repo_name,
         "base_commit": commit_id,

@@ -33,7 +33,7 @@ from agentless.util.preprocess_data import (
 from agentless.util.utils import load_jsonl
 
 repair_relevant_file_instruction = """
-Below are some code segments, each from a relevant file. One or more of these files may contain bugs.
+Below are some code segments, each from a relevant file. Use these code segments to write unit tests that cover the code changes of the issue.
 """
 repair_relevant_file_with_scope_instruction = """
 Below are some code segments, each from a relevant file. One or more of these files may contain bugs.
@@ -88,7 +88,7 @@ We are currently solving the following issue within our repository. Here is the 
 ```
 --- END FILE ---
 
-Please first localize the bug based on the issue statement, and then generate `edit_file` commands to fix the issue.
+Please first localize the tests to generate according to the issue statement and code changes, and then generate `edit_file` commands that writes the relevant tests.
 
 The `edit_file` command takes four arguments:
 
@@ -106,10 +106,13 @@ Wrap the `edit_file` command in blocks ```python...```.
 
 
 repair_prompt_combine_topn_cot_diff = """
-We are currently solving the following issue within our repository. Here is the issue text:
+We are currently writing tests for the following issue within our repository. Here is the issue text and code changes done:
 --- BEGIN ISSUE ---
 {problem_statement}
 --- END ISSUE ---
+--- BEGIN CODE CHANGES ---
+{code_changes}
+--- END CODE CHANGES ---
 
 {repair_relevant_file_instruction}
 --- BEGIN FILE ---
@@ -118,7 +121,7 @@ We are currently solving the following issue within our repository. Here is the 
 ```
 --- END FILE ---
 
-Please first localize the bug based on the issue statement, and then generate *SEARCH/REPLACE* edits to fix the issue.
+Please first localize the tests to generate according to the issue statement and code changes, and then generate `edit_file` commands that writes the relevant tests.
 
 Every *SEARCH/REPLACE* edit must use this format:
 1. The file path
@@ -140,7 +143,7 @@ from flask import Flask
 >>>>>>> REPLACE
 ```
 
-Please note that the *SEARCH/REPLACE* edit REQUIRES PROPER INDENTATION. If you would like to add the line '        print(x)', you must fully write that out, with all those spaces before the code!
+Please note that the *SEARCH/REPLACE* edit REQUIRES PROPER INDENTATION. If you would like to add the line '        assertTrue(x)', you must fully write that out, with all those spaces before the code!
 Wrap the *SEARCH/REPLACE* edit in blocks ```python...```.
 """
 
@@ -253,7 +256,7 @@ def repair(args):
     with open(f"{args.output_folder}/args.json", "w") as f:
         json.dump(vars(args), f, indent=4)
 
-    swe_bench_data = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
+    swe_bench_data = load_dataset("princeton-nlp/SWE-bench", split="test")
 
     locs = load_jsonl(args.loc_file)
 
@@ -307,8 +310,9 @@ def repair(args):
 
         bench_data = [x for x in swe_bench_data if x["instance_id"] == instance_id][0]
         problem_statement = bench_data["problem_statement"]
+        code_changes = loc['code_changes']
         structure = get_repo_structure(
-            instance_id, bench_data["repo"], bench_data["base_commit"], "playground"
+            instance_id, bench_data["repo"], bench_data["base_commit"], "playground", args.clone_from_local_dir, code_changes
         )
 
         files, _, _ = get_full_file_paths_and_classes_and_functions(structure)
@@ -390,6 +394,7 @@ def repair(args):
         message = prompt_template.format(
             repair_relevant_file_instruction=file_instruction,
             problem_statement=problem_statement,
+            code_changes=code_changes,
             content=topn_content.rstrip(),  # remove trailing newlines
         ).strip()
 
@@ -719,6 +724,7 @@ def main():
     parser.add_argument(
         "--mock", action="store_true", help="Mock run to compute prompt tokens."
     )
+    parser.add_argument("--clone_from_local_dir", type=str | None, default=None)
 
     args = parser.parse_args()
 

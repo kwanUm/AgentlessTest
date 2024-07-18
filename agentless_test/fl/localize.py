@@ -4,9 +4,9 @@ import logging
 import os
 
 from datasets import load_dataset
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
-from agentless.fl.FL import LLMFL
+from agentless_test.fl.FL import LLMFL
 from agentless.util.preprocess_data import (
     filter_none_python,
     filter_out_test_files,
@@ -23,15 +23,53 @@ from get_repo_structure.get_repo_structure import (
 PROJECT_FILE_LOC = os.environ.get("PROJECT_FILE_LOC", None)
 
 
+import re
+
+def check_python_files_changed(code_changes):
+    """
+    Check if any Python files were added or edited in the code changes.
+
+    Args:
+    code_changes (str): The code changes in diff format.
+
+    Returns:
+    bool: True if any .py files were added or edited, False otherwise.
+    """
+    # Regex to find filenames for added or modified Python files
+    # This pattern checks for lines starting with '+++ b/' indicating a new or modified file in a git diff
+    # and checks that the filename ends with '.py'
+    python_files = re.findall(r'\+\+\+ b/(?!.*\.py\s*$).+\.py', code_changes)
+    
+    # Check if any Python files were found
+    return len(python_files) > 0
+
 def localize(args):
 
-    swe_bench_data = load_dataset("princeton-nlp/SWE-bench_Lite", split="test")
+    if args.tasks_path:
+        swe_bench_data = load_jsonl(args.tasks_path)
+        # filter to those without tests
+        swe_bench_data = [p for p in swe_bench_data if not p['test_patch']]
+    else:
+        swe_bench_data = load_dataset("princeton-nlp/SWE-bench", split="test")
 
     if args.start_file:
         start_file_locs = load_jsonl(args.start_file)
 
-    for bug in swe_bench_data:
-
+    for bug in tqdm(swe_bench_data):
+        print(bug['patch'])
+        
+        if not check_python_files_changed(bug['patch']):
+            continue
+        
+        fl = LLMFL(
+            bug["instance_id"],
+            None,
+            bug['problem_statement'],
+            bug['patch'],
+        )
+        if not fl.evaluate_test_necessity(mock=args.mock):
+            continue
+        
         if args.target_id is not None:
             if args.target_id != bug["instance_id"]:
                 continue
@@ -42,7 +80,7 @@ def localize(args):
         else:
             # we need to get the project structure directly
             d = get_project_structure_from_scratch(
-                bug["repo"], bug["base_commit"], bug["instance_id"], "playground"
+                bug["repo"], bug["base_commit"], bug["instance_id"], "playground", args.clone_from_local_dir, bug["patch"]
             )
 
         instance_id = d["instance_id"]
@@ -51,12 +89,13 @@ def localize(args):
 
         bench_data = [x for x in swe_bench_data if x["instance_id"] == instance_id][0]
         problem_statement = bench_data["problem_statement"]
+        code_changes = bench_data["patch"]
+        if bench_data != bug: 
+            print(f"WARNING: weird mismatch, {bench_data}, {bug}")
         structure = d["structure"]
         filter_none_python(structure)
         # some basic filtering steps
         # filter out test files (unless its pytest)
-        if not d["instance_id"].startswith("pytest"):
-            filter_out_test_files(structure)
 
         found_files = []
         found_related_locs = []
@@ -73,6 +112,7 @@ def localize(args):
                 d["instance_id"],
                 structure,
                 problem_statement,
+                code_changes,
             )
             found_files, additional_artifact_loc_file, file_traj = fl.localize(
                 mock=args.mock
@@ -101,6 +141,7 @@ def localize(args):
                     d["instance_id"],
                     structure,
                     problem_statement,
+                    code_changes,
                 )
 
                 additional_artifact_loc_related = []
@@ -128,6 +169,7 @@ def localize(args):
                 instance_id,
                 structure,
                 problem_statement,
+                code_changes
             )
             coarse_found_locs = {}
             for i, pred_file in enumerate(pred_files):
@@ -167,6 +209,7 @@ def localize(args):
                         "found_edit_locs": found_edit_locs,
                         "additional_artifact_loc_edit_location": additional_artifact_loc_edit_location,
                         "edit_loc_traj": edit_loc_traj,
+                        "code_changes": code_changes,
                     }
                 )
                 + "\n"
@@ -261,9 +304,12 @@ def main():
     parser.add_argument("--sticky_scroll", action="store_true")
     parser.add_argument("--context_window", type=int, default=10)
     parser.add_argument("--target_id", type=str)
+    parser.add_argument("--tasks_path", type=str)
     parser.add_argument(
         "--mock", action="store_true", help="Mock run to compute prompt tokens."
     )
+    parser.add_argument("--clone_from_local_dir", type=str)
+
 
     args = parser.parse_args()
 
@@ -271,7 +317,9 @@ def main():
 
     args.output_file = os.path.join(args.output_folder, args.output_file)
 
-    assert not os.path.exists(args.output_file), "Output file already exists"
+    # assert not os.path.exists(args.output_file), "Output file already exists"
+    if os.path.exists(args.output_file):
+        os.remove(args.output_file)
 
     assert not (
         args.file_level and args.start_file
